@@ -9,12 +9,23 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"os"
+	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
-	"os/exec"
-	"os"
+	"sync"
+	"syscall"
 	"time"
+
+	"github.com/kless/terminal"
+	"github.com/kr/pty"
 )
+
+func init() {
+	gob.Register(exec.ExitError{})
+	gob.Register(os.ProcessState{})
+}
 
 var broker = flag.Bool("broker", false, "Broker")
 var worker = flag.Bool("worker", false, "Worker")
@@ -24,18 +35,45 @@ var nohupnice = flag.Bool("nohupnice", false, "nohup and nice")
 var broker_addr = flag.String("baddr", "localhost", "Broker address")
 var via = flag.String("via", "localhost", "Host to ssh via")
 
+type Message struct {
+	Code    Code
+	Content []byte
+	Err     error
+	Reason  int
+}
+
+type Code int
+
+const (
+	STDIN Code = iota
+	STDIN_CLOSED
+	STDOUT
+	STDERR
+
+	SIGINT
+
+	END
+)
+
 func gobber(channel io.ReadWriter) (func(interface{}), func(interface{})) {
 
 	send := gob.NewEncoder(channel).Encode
 	recv := gob.NewDecoder(channel).Decode
 
+	// sends/recieves should behave as though they're atomic
+	var smutex, rmutex sync.Mutex
+
 	s := func(value interface{}) {
+		smutex.Lock()
+		defer smutex.Unlock()
 		e := send(value)
 		if e != nil {
 			panic(e)
 		}
 	}
 	r := func(value interface{}) {
+		rmutex.Lock()
+		defer rmutex.Unlock()
 		e := recv(value)
 		if e != nil {
 			panic(e)
@@ -118,7 +156,7 @@ func Serve(l net.Listener) error {
 	defer l.Close()
 	var tempDelay time.Duration // how long to sleep on accept failure
 
-	log.Print("Serving connections..")
+	log.Print("Serving connections.. aasdf")
 
 	for {
 		client, e := l.Accept()
@@ -153,7 +191,6 @@ func Serve(l net.Listener) error {
 			continue
 		}
 
-		//log.Printf("Accepted connection from %#+v to %#+v", client.RemoteAddr(), client.LocalAddr())
 		go ServeOne(client)
 	}
 }
@@ -178,45 +215,139 @@ type Sender struct {
 	send func(interface{})
 }
 
-func (s Sender) Write(data []byte) (int, error) {
-	println(string(data))
-	s.send(s.code)
-	s.send(data)
+type JobInfo struct {
+	HasTerm bool
+}
+
+func (s *Sender) Write(data []byte) (int, error) {
+	log.Printf("Data: %q", string(data))
+	s.send(Message{Code: s.code, Content: data})
 	return len(data), nil
 }
 
 func HandleJob(send, recv func(interface{})) {
 	send("ok")
+
 	var args []string
 	recv(&args)
+
+	var jobinfo JobInfo
+	recv(&jobinfo)
 
 	log.Printf("Got arguments to run: %v", args)
 
 	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Stdout = Sender{STDOUT, send}
-	cmd.Stderr = Sender{STDERR, send}
+
+	var stdin io.WriteCloser
+
+	if jobinfo.HasTerm {
+		pipe, child, err := pty.Open()
+		if err != nil {
+			panic(err)
+		}
+		cmd.Stdin = child
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setctty: true, Setsid: true}
+		stdin = pipe
+	} else {
+		pipe, err := cmd.StdinPipe()
+		if err != nil {
+			panic(err)
+		}
+		stdin = pipe
+	}
+
+	cmd.Stdout = &Sender{STDOUT, send}
+	cmd.Stderr = &Sender{STDERR, send}
 
 	err := cmd.Start()
 	if err != nil {
-		send(END)
-		send(err)
+		log.Print("Process failed")
+		send(Message{Code: END, Err: err})
+		return
 	}
 
-	result := cmd.Wait()
-	send(END)
-	send(result)
+	// Process stdin
+	go func() {
+		log.Printf("Processing stdin")
+		defer func() {
+			var err interface{}
+			if err = recover(); err == nil {
+				return
+			}
+
+			var closed bool
+			if err.(error).Error() == "use of closed network connection" {
+				closed = true
+			}
+			switch e := err.(type) {
+			case *net.OpError:
+				// Network connection may be closed?
+				if e.Err.Error() == "use of closed network connection" {
+					closed = true
+				}
+				log.Printf("Unknown network error? %#+v", err)
+			default:
+				log.Printf("Unknown error? %#+v", err)
+			}
+			if !closed {
+				panic(err)
+			}
+			log.Println("Client closed connection")
+
+		}()
+
+		var m Message
+		for {
+			recv(&m)
+
+			switch m.Code {
+			case STDIN:
+				// Here is something to feed to stdin..
+				for len(m.Content) > 0 {
+					n, err := stdin.Write(m.Content)
+					m.Content = m.Content[n:]
+					if err != nil {
+						panic(err)
+					}
+				}
+
+			case STDIN_CLOSED:
+				stdin.Close()
+
+			case SIGINT:
+				cmd.Process.Signal(os.Interrupt)
+
+			default:
+				panic(fmt.Errorf("Unhandled code: %v", m.Code))
+			}
+		}
+	}()
+
+	err = cmd.Wait()
+	log.Print("Process exited")
+
+	if err != nil {
+		switch err := err.(type) {
+		case *exec.ExitError:
+			// Unix only
+			status := err.ProcessState.Sys().(syscall.WaitStatus)
+			if !status.Exited() {
+				log.Panicf("Process hasn't exited when it should have.. %#+v", err.ProcessState)
+			}
+			send(Message{Code: END, Reason: status.ExitStatus()})
+			return
+		default:
+			panic(err)
+		}
+	}
+	send(Message{Code: END})
 }
 
-type Code int
-
-const (
-	STDOUT Code = iota
-	STDERR
-	END
-)
-
+// Client side of creating new job
 func NewJob(send, recv func(interface{})) error {
 	send("job")
+	send(flag.Args())
+	send(JobInfo{terminal.IsTerminal(int(os.Stdin.Fd()))})
 
 	var response string
 	recv(&response)
@@ -224,13 +355,80 @@ func NewJob(send, recv func(interface{})) error {
 		return fmt.Errorf("Got invalid response from server: %q", response)
 	}
 
-	send(flag.Args())
+	done := make(chan bool)
+
+	// Handle stdin
+	go func() {
+		defer send(Message{Code: STDIN_CLOSED})
+
+		var buf [10240]byte
+		for {
+			n, err := os.Stdin.Read(buf[:])
+			//log.Printf("Read %v bytes from stdin", n)
+			if err != nil {
+				return
+			}
+			send(Message{Code: STDIN, Content: buf[:n]})
+		}
+	}()
+
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+
+	go func() {
+		for {
+			var v Message
+			recv(&v)
+
+			switch v.Code {
+			case STDOUT:
+				os.Stdout.Write(v.Content)
+			case STDERR:
+				os.Stderr.Write(v.Content)
+			case END:
+				done <- true
+				return
+			}
+		}
+	}()
+
+	var last_interrupt time.Time
+
+	for {
+		select {
+		case <-interrupt:
+			send(Message{Code: SIGINT})
+			if time.Since(last_interrupt) < 250*time.Millisecond {
+				// Respond to interrupt
+				return nil
+			}
+			last_interrupt = time.Now()
+		case <-done:
+			return nil
+		}
+	}
 
 	return nil
 }
 
-func SafeConnect(address, port string) (result io.ReadWriter, err error) {
-	cmd := exec.Command("ssh", *via, "nc", address, port)
+type MultiCloser []io.Closer
+
+// Closes multiple closers, returns the error of the final one
+// TODO(pwaller): Instead, return slice of errors, perhaps?
+func (c *MultiCloser) Close() (err error) {
+	for _, closer := range *c {
+		e := closer.Close()
+		if e != nil {
+			err = e
+		}
+	}
+	return
+}
+
+func SafeConnect(address, port string) (result io.ReadWriteCloser, err error) {
+	netcat := fmt.Sprintf("nc %s %s 2> /dev/null", address, port)
+	cmd := exec.Command("ssh", *via, netcat)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()
@@ -251,27 +449,36 @@ func SafeConnect(address, port string) (result io.ReadWriter, err error) {
 	return struct {
 		io.Reader
 		io.Writer
-	}{stdout, stdin}, nil
+		io.Closer
+	}{stdout, stdin, &MultiCloser{stdin, stdout}}, nil
+}
+
+func Broker() {
+	l, e := net.Listen("tcp", "localhost:1234")
+	if e != nil {
+		log.Fatal("listen error:", e)
+	}
+	Serve(l)
 }
 
 func main() {
 	flag.Parse()
 
 	if *broker {
-		l, e := net.Listen("tcp", "localhost:1234")
-		if e != nil {
-			log.Fatal("listen error:", e)
-		}
-		Serve(l)
+		Broker()
 		return
 	}
 
 	// The difference between a secure connection and an unsecure one..
-	//conn, err := net.Dial("tcp", *broker_addr + ":1234")
+	//conn, err := net.Dial("tcp", *broker_addr+":1234")
 	conn, err := SafeConnect(*broker_addr, "1234")
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}
+	defer func() {
+		log.Printf("Closing connection")
+		conn.Close()
+	}()
 
 	send, recv := gobber(conn)
 
