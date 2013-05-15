@@ -38,13 +38,19 @@ func AutoPanic(f interface{}) func(...interface{}) {
 
 // Client side of creating new job
 func NewJob(send, recv func(interface{}) error) error {
-	send("job")
-	send(flag.Args())
-	send(util.JobInfo{terminal.IsTerminal(int(os.Stdin.Fd()))})
+	err := send("job")
+	if err != nil {
+		return err
+	}
+	isterm := terminal.IsTerminal(int(os.Stdin.Fd()))
+	err = send(util.JobInfo{isterm, flag.Args()})
+	if err != nil {
+		return err
+	}
 
 	var response string
 
-	err := recv(&response)
+	err = recv(&response)
 	if err != nil {
 		return err
 	}
@@ -62,6 +68,8 @@ func NewJob(send, recv func(interface{}) error) error {
 				panic(err)
 			}
 			println() // Mimic terminal behaviour poorly
+			// (when Ctrl-D is pressed, a newline comes from somewhere..)
+			// (might not be terminal, might be python, my test program.)
 		}()
 
 		var buf [10240]byte

@@ -26,6 +26,7 @@ type Message struct {
 
 type JobInfo struct {
 	HasTerm bool
+	Args    []string
 }
 
 type Code int

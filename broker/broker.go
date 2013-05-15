@@ -37,21 +37,15 @@ func HandleJob(send, recv func(interface{}) error) error {
 		return err
 	}
 
-	var args []string
-	err = recv(&args)
-	if err != nil {
-		return err
-	}
-
 	var jobinfo util.JobInfo
 	err = recv(&jobinfo)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("Got arguments to run: %v", args)
+	log.Printf("Got arguments to run: %v", jobinfo.Args)
 
-	cmd := exec.Command(args[0], args[1:]...)
+	cmd := exec.Command(jobinfo.Args[0], jobinfo.Args[1:]...)
 
 	var stdin io.WriteCloser
 
