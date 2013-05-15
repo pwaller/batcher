@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ type Message struct {
 	Content []byte
 	Err     error
 	Reason  int
+	Signal  os.Signal
 }
 
 type JobInfo struct {
@@ -29,7 +31,9 @@ type JobInfo struct {
 type Code int
 
 const (
-	STDIN Code = iota
+	RESERVED Code = iota // to differentiate empty message
+
+	STDIN
 	STDIN_CLOSED
 	STDOUT
 	STDERR
@@ -79,7 +83,7 @@ func CheckUser(addr *net.TCPAddr) bool {
 	return false
 }
 
-func Gobber(channel io.ReadWriter) (func(interface{}), func(interface{})) {
+func Gobber(channel io.ReadWriter) (s, r func(interface{}) error) {
 
 	send := gob.NewEncoder(channel).Encode
 	recv := gob.NewDecoder(channel).Decode
@@ -87,43 +91,40 @@ func Gobber(channel io.ReadWriter) (func(interface{}), func(interface{})) {
 	// sends/recieves should behave as though they're atomic
 	var smutex, rmutex sync.Mutex
 
-	s := func(value interface{}) {
+	s = func(value interface{}) (err error) {
 		smutex.Lock()
 		defer smutex.Unlock()
-		e := send(value)
-		if e != nil {
-			panic(e)
-		}
+		err = send(value)
+		return
 	}
-	r := func(value interface{}) {
+	r = func(value interface{}) (err error) {
 		rmutex.Lock()
 		defer rmutex.Unlock()
-		e := recv(value)
-		if e != nil {
-			panic(e)
-		}
+		err = recv(value)
+		return
 	}
 
-	return s, r
+	return
 }
 
-type MultiCloser []io.Closer
+type SSHCloser struct {
+	//proc *os.Process
+	//cmd *exec.Cmd
+	stdin, stdout io.Closer
+}
 
-// Closes multiple closers, returns the error of the final one
-// TODO(pwaller): Instead, return slice of errors, perhaps?
-func (c *MultiCloser) Close() (err error) {
-	for _, closer := range *c {
-		e := closer.Close()
-		if e != nil {
-			err = e
-		}
-	}
+func (c *SSHCloser) Close() (err error) {
+	// Let SSH know we're done with him..
+	//c.proc.Signal(syscall.SIGHUP)
+	c.stdin.Close()
+	c.stdout.Close()
 	return
 }
 
 func SafeConnect(via, address, port string) (result io.ReadWriteCloser, err error) {
 	netcat := fmt.Sprintf("nc %s %s 2> /dev/null", address, port)
 	cmd := exec.Command("ssh", via, netcat)
+	// Run in its own process group so that we don't get "Killed by signal" messages
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = os.Stderr
 
@@ -135,16 +136,51 @@ func SafeConnect(via, address, port string) (result io.ReadWriteCloser, err erro
 	if err != nil {
 		return
 	}
+	err = cmd.Start()
+	if err != nil {
+		return nil, err
+	}
 	go func() {
-		err := cmd.Run()
+		//err := cmd.Wait()
+		// Note: can't use cmd.Wait here due to data races on the file
+		//       descriptors
+		_, err := cmd.Process.Wait()
 		if err != nil {
-			// Crap, ssh bailed on us.
-			panic(err)
+			// Crap, ssh bailed on us?
+			//panic(err)
+			log.Printf("ssh exited: %v", err)
 		}
 	}()
 	return struct {
 		io.Reader
 		io.Writer
 		io.Closer
-	}{stdout, stdin, &MultiCloser{stdin, stdout}}, nil
+	}{stdout, stdin, &SSHCloser{stdin, stdout}}, nil
+}
+
+func HandleNetClose() {
+	var err interface{}
+	if err = recover(); err == nil {
+		return
+	}
+
+	var closed bool
+	if err.(error).Error() == "use of closed network connection" {
+		closed = true
+	}
+	switch e := err.(type) {
+	case *net.OpError:
+		// Network connection may be closed?
+		if e.Err.Error() == "use of closed network connection" {
+			closed = true
+		} else {
+			log.Printf("Unknown network error? %#+v", err)
+		}
+	default:
+		log.Printf("Unknown error? %#+v", err)
+	}
+	if !closed {
+		panic(err)
+	}
+	log.Println("Client closed connection")
 }

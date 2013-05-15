@@ -17,27 +17,37 @@ import (
 
 type Sender struct {
 	code util.Code
-	send func(interface{})
+	send func(interface{}) error
 }
 
 func (s *Sender) Write(data []byte) (int, error) {
-	log.Printf("Data: %q", string(data))
-	s.send(util.Message{Code: s.code, Content: data})
-	return len(data), nil
+	log.Printf("Data: %q %q", s.code, string(data))
+	err := s.send(util.Message{Code: s.code, Content: data})
+	return len(data), err
 }
 
-func HandleWorker(send, recv func(interface{})) {
+func HandleWorker(send, recv func(interface{}) error) error {
 	send("ok")
+	return nil
 }
 
-func HandleJob(send, recv func(interface{})) {
-	send("ok")
+func HandleJob(send, recv func(interface{}) error) error {
+	err := send("ok")
+	if err != nil {
+		return err
+	}
 
 	var args []string
-	recv(&args)
+	err = recv(&args)
+	if err != nil {
+		return err
+	}
 
 	var jobinfo util.JobInfo
-	recv(&jobinfo)
+	err = recv(&jobinfo)
+	if err != nil {
+		return err
+	}
 
 	log.Printf("Got arguments to run: %v", args)
 
@@ -61,48 +71,41 @@ func HandleJob(send, recv func(interface{})) {
 		stdin = pipe
 	}
 
+	// Known issue with this technique:
+	// Take the python prompt.
+	//   >>> print "Hello world"
+	//   >>> Hello world
+	// ... oops, what happened? The STDERR write of ">>> " got reordered WRT
+	// the STDOUT write of "Hello world". The program may issue the write
+	// syscalls in a fixed order, but select'ing against the two pipes might
+	// yield a different order. No clue how to solve this.
+	//
+	// One possible way around might be to ensure that the FD's flush on every
+	// syscall.
+	//
+	// Suggestion: write testcase which is able to reproduce it with enough
+	// iterations
 	cmd.Stdout = &Sender{util.STDOUT, send}
 	cmd.Stderr = &Sender{util.STDERR, send}
 
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		log.Print("Process failed")
 		send(util.Message{Code: util.END, Err: err})
-		return
+		return err
 	}
 
 	// Process stdin
 	go func() {
 		log.Printf("Processing stdin")
-		defer func() {
-			var err interface{}
-			if err = recover(); err == nil {
-				return
-			}
-
-			var closed bool
-			if err.(error).Error() == "use of closed network connection" {
-				closed = true
-			}
-			switch e := err.(type) {
-			case *net.OpError:
-				// Network connection may be closed?
-				if e.Err.Error() == "use of closed network connection" {
-					closed = true
-				}
-				log.Printf("Unknown network error? %#+v", err)
-			default:
-				log.Printf("Unknown error? %#+v", err)
-			}
-			if !closed {
-				panic(err)
-			}
-			log.Println("Client closed connection")
-		}()
+		defer util.HandleNetClose()
 
 		var m util.Message
 		for {
-			recv(&m)
+			err := recv(&m)
+			if err != nil {
+				panic(err)
+			}
 
 			switch m.Code {
 			case util.STDIN:
@@ -116,7 +119,8 @@ func HandleJob(send, recv func(interface{})) {
 				}
 
 			case util.STDIN_CLOSED:
-				stdin.Close()
+				cmd.Process.Signal(syscall.SIGHUP)
+				return
 
 			case util.SIGINT:
 				cmd.Process.Signal(os.Interrupt)
@@ -137,18 +141,22 @@ func HandleJob(send, recv func(interface{})) {
 			status := err.ProcessState.Sys().(syscall.WaitStatus)
 			log.Printf("%#+v %v %v", status, status.Signaled(), status.Signal())
 			if status.Signaled() {
-				log.Print("Process was signalled?!")
+				send(util.Message{Code: util.END, Signal: status.Signal()})
+				return nil
 			}
-			if !status.Exited() {
-				log.Panicf("Process hasn't exited when it should have.. %#+v", err.ProcessState)
+			if status.Exited() {
+				send(util.Message{Code: util.END, Reason: status.ExitStatus()})
+				return nil
 			}
-			send(util.Message{Code: util.END, Reason: status.ExitStatus()})
-			return
+			log.Panicf("Process hasn't exited when it should have.. %#+v", err.ProcessState)
+
+			return err
 		default:
 			panic(err)
 		}
 	}
 	send(util.Message{Code: util.END})
+	return nil
 }
 
 func ServeOne(conn net.Conn) {
@@ -166,15 +174,25 @@ func ServeOne(conn net.Conn) {
 	send, recv := util.Gobber(conn)
 
 	var client_type string
-	recv(&client_type)
+	err := recv(&client_type)
+	if err != nil {
+		panic(err)
+	}
 
 	log.Printf("Got a new connection: %q", client_type)
 
 	switch client_type {
 	case "worker":
-		HandleWorker(send, recv)
+		err := HandleWorker(send, recv)
+		if err != nil {
+			panic(err)
+		}
 	case "job":
-		HandleJob(send, recv)
+		err := HandleJob(send, recv)
+		log.Print("Job handled: ", err)
+		if err != nil {
+			panic(err)
+		}
 	default:
 	}
 
