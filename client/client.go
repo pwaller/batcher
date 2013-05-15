@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kless/terminal"
+
 	"github.com/pwaller/batcher/util"
 )
 
@@ -64,7 +65,7 @@ func NewJob(send, recv func(interface{}) error) error {
 	go func() {
 		defer func() {
 			err := send(util.Message{Code: util.STDIN_CLOSED})
-			if err != nil {
+			if err != nil && err.Error() != "use of closed network connection" {
 				panic(err)
 			}
 			println() // Mimic terminal behaviour poorly

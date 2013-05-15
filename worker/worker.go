@@ -4,9 +4,140 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"os/exec"
+	"syscall"
 
+	"github.com/kr/pty"
 	"github.com/pwaller/batcher/util"
 )
+
+type Sender struct {
+	code util.Code
+	send func(interface{}) error
+}
+
+func (s *Sender) Write(data []byte) (int, error) {
+	log.Printf("Data: %q %q", s.code, string(data))
+	err := s.send(util.Message{Code: s.code, Content: data})
+	return len(data), err
+}
+
+func HandleJob(jobinfo util.JobInfo, send, recv func(interface{}) error) error {
+	log.Printf("Got arguments to run: %v", jobinfo.Args)
+
+	cmd := exec.Command(jobinfo.Args[0], jobinfo.Args[1:]...)
+
+	var stdin io.WriteCloser
+
+	if jobinfo.HasTerm {
+		pipe, child, err := pty.Open()
+		if err != nil {
+			panic(err)
+		}
+		cmd.Stdin = child
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setctty: true, Setsid: true}
+		stdin = pipe
+	} else {
+		pipe, err := cmd.StdinPipe()
+		if err != nil {
+			panic(err)
+		}
+		stdin = pipe
+	}
+
+	// Known issue with this technique:
+	// Take the python prompt.
+	//   >>> print "Hello world"
+	//   >>> Hello world
+	// ... oops, what happened? The STDERR write of ">>> " got reordered WRT
+	// the STDOUT write of "Hello world". The program may issue the write
+	// syscalls in a fixed order, but select'ing against the two pipes might
+	// yield a different order. No clue how to solve this.
+	//
+	// One possible way around might be to ensure that the FD's flush on every
+	// syscall.
+	//
+	// Suggestion: write testcase which is able to reproduce it with enough
+	// iterations
+	cmd.Stdout = &Sender{util.STDOUT, send}
+	cmd.Stderr = &Sender{util.STDERR, send}
+
+	err := cmd.Start()
+	if err != nil {
+		log.Print("Process failed")
+		send(util.Message{Code: util.END, Err: err})
+		return err
+	}
+
+	// Process stdin
+	go func() {
+		log.Printf("Processing stdin")
+		defer util.HandleNetClose()
+
+		var m util.Message
+		for {
+			err := recv(&m)
+			if err != nil {
+				panic(err)
+			}
+
+			switch m.Code {
+			case util.STDIN:
+				// Here is something to feed to stdin..
+				for len(m.Content) > 0 {
+					n, err := stdin.Write(m.Content)
+					m.Content = m.Content[n:]
+					if err != nil {
+						panic(err)
+					}
+				}
+
+			case util.STDIN_CLOSED:
+				cmd.Process.Signal(syscall.SIGHUP)
+				return
+
+			case util.SIGINT:
+				cmd.Process.Signal(os.Interrupt)
+
+			default:
+				panic(fmt.Errorf("Unhandled code: %v", m.Code))
+			}
+		}
+	}()
+
+	err = cmd.Wait()
+	log.Print("Finished waiting for process..")
+
+	if err != nil {
+		switch err := err.(type) {
+		case *exec.ExitError:
+			// Unix only
+			status := err.ProcessState.Sys().(syscall.WaitStatus)
+			log.Printf("%#+v %v %v", status, status.Signaled(), status.Signal())
+			if status.Signaled() {
+				// TODO(pwaller): Do we want to drop these errors on the ground? Probably
+				send(util.Message{Code: util.END, Signal: status.Signal()})
+				return nil
+			}
+			if status.Exited() {
+				// TODO(pwaller): Do we want to drop these errors on the ground? Probably
+				send(util.Message{Code: util.END, Reason: status.ExitStatus()})
+				return nil
+			}
+			log.Panicf("Process hasn't exited when it should have.. %#+v", err.ProcessState)
+
+			return err
+		default:
+			panic(err)
+		}
+	}
+	err = send(util.Message{Code: util.END})
+	if err != nil {
+		return err
+	}
+	return nil
+}
 
 func Worker(send, recv func(interface{}) error) error {
 	err := send("worker")
@@ -32,6 +163,22 @@ func Worker(send, recv func(interface{}) error) error {
 		}
 		if err != nil {
 			return err
+		}
+
+		switch m.Code {
+		case util.WORKER_NEWJOB:
+
+			log.Printf("Handling job..")
+			err = HandleJob(m.Job, send, recv)
+			log.Printf(" .. job finished. %v", err)
+			// TODO(pwaller): We should be robust against all types of failure
+			// other than socket failure here.
+			if err != nil {
+				return err
+			}
+
+		default:
+			log.Panicf("Recieved unexpected code %v", m.Code)
 		}
 	}
 

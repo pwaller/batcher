@@ -16,12 +16,15 @@ import (
 	"syscall"
 )
 
+// Variant type of sorts.. meaning is different depending on the value of `code`
 type Message struct {
-	Code    Code
+	Code Code
+
 	Content []byte
 	Err     error
 	Reason  int
 	Signal  os.Signal
+	Job     JobInfo
 }
 
 type JobInfo struct {
@@ -34,6 +37,8 @@ type Code int
 const (
 	RESERVED Code = iota // to differentiate empty message
 
+	END
+
 	STDIN
 	STDIN_CLOSED
 	STDOUT
@@ -41,7 +46,7 @@ const (
 
 	SIGINT
 
-	END
+	WORKER_NEWJOB
 )
 
 // Return true if the other end of `addr` belongs to the same user as the server
