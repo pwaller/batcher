@@ -16,15 +16,20 @@ import (
 	"syscall"
 )
 
+func init() {
+	gob.Register(new(syscall.Signal))
+}
+
 // Variant type of sorts.. meaning is different depending on the value of `code`
 type Message struct {
 	Code Code
 
 	Content []byte
 	Err     error
-	Reason  int
-	Signal  os.Signal
-	Job     JobInfo
+
+	Reason int
+	Signal os.Signal
+	Job    JobInfo
 }
 
 type JobInfo struct {
@@ -101,6 +106,7 @@ func Gobber(channel io.ReadWriter) (s, r func(interface{}) error) {
 		smutex.Lock()
 		defer smutex.Unlock()
 		err = send(value)
+		//log.Print("SENDING VALUE ", value, err)
 		return
 	}
 	r = func(value interface{}) (err error) {
@@ -165,6 +171,7 @@ func SafeConnect(via, address, port string) (result io.ReadWriteCloser, err erro
 }
 
 func HandleNetClose() {
+	return
 	var err interface{}
 	if err = recover(); err == nil {
 		return

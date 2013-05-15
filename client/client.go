@@ -121,9 +121,13 @@ func NewJob(send, recv func(interface{}) error) error {
 	for {
 		select {
 		case <-interrupt:
-			send(util.Message{Code: util.SIGINT})
+			err = send(util.Message{Code: util.SIGINT})
+			if err != nil {
+				panic(err)
+			}
 			if time.Since(last_interrupt) < 250*time.Millisecond {
-				// Respond to interrupt
+				// Respond to interrupt if two interrupts are received in short
+				// succession
 				return nil
 			}
 			last_interrupt = time.Now()
