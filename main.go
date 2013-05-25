@@ -2,102 +2,109 @@ package main
 
 import (
 	"flag"
-	"io"
 	"log"
 	"net"
 	"os"
-	"os/exec"
-	"strings"
-	"syscall"
 
-	"github.com/kr/pty"
-
-	"github.com/pwaller/batcher/broker"
-	"github.com/pwaller/batcher/client"
-	"github.com/pwaller/batcher/util"
-	"github.com/pwaller/batcher/worker"
+	"github.com/kylelemons/fatchan"
 )
 
-var _ = net.FlagBroadcast
+// Flags
+var (
+	broker   = flag.Bool("broker", false, "Run as broker")
+	worker   = flag.Bool("worker", false, "Run as worker")
+	n_worker = flag.Int("N", 1, "Number of workers to start")
+	nice     = flag.Int("nice", 15, "Niceness of workers")
 
-var start_broker = flag.Bool("broker", false, "Broker")
-var start_worker = flag.Bool("worker", false, "Worker")
+	broadcast         = flag.Bool("broadcast", false, "Run on all workers")
+	broadcast_machine = flag.Bool("broadcast-machine", false, "Run on all machines")
+	addr              = flag.String("addr", ":1234", "Address on which to listen or connect")
+	via               = flag.String("via", os.Getenv("BATCHER_VIA"), "Host to ssh via")
+)
 
-var nohupnice = flag.Bool("nohupnice", false, "nohup and nice")
+type ClientType int
 
-var broker_addr = flag.String("baddr", "localhost", "Broker address")
-var via = flag.String("via", "", "Host to ssh via")
+const (
+	CLIENT_TYPE_UNKNOWN ClientType = iota
+	CLIENT_TYPE_WORKER
+	CLIENT_TYPE_JOB
+	CLIENT_TYPE_BROADCAST
+)
+
+type Login struct {
+	Type ClientType
+	Send chan Message `fatchan:"request"`
+	Recv chan Message `fatchan:"reply"`
+}
+
+type MessageType int
+
+const (
+	MESSAGE_TYPE_UNKNOWN MessageType = iota
+	MESSAGE_TYPE_ACKNOWLEDGE
+	MESSAGE_TYPE_NEW_JOB
+	MESSAGE_TYPE_NEW_WORKER
+	MESSAGE_TYPE_BROADCAST
+)
+
+type Message struct {
+	Type   MessageType
+	Job    NewJob
+	Worker NewWorker
+}
+
+type NewJob struct {
+	Args []string
+
+	Stdin  chan []byte `fatchan:"request"`
+	Stdout chan []byte `fatchan:"reply"`
+	Stderr chan []byte `fatchan:"reply"`
+
+	Accepted chan bool `fatchan:"reply"`
+	Done     chan bool `fatchan:"reply"`
+}
+
+type NewWorker struct {
+	NewJob chan NewJob `fatchan:"reply"`
+}
 
 func main() {
 	flag.Parse()
 
-	if *start_broker {
-		broker.BrokerServe()
-		return
+	switch {
+	case *broker:
+		NewServer().ListenAndServe(*addr)
+	case *worker:
+		(&Worker{}).Connect(*addr, *via)
+	default:
+		(&Client{}).Connect(*addr, *via, os.Args[1:])
 	}
+}
 
-	if *start_worker && *nohupnice {
-		var args []string
-		for _, a := range os.Args {
-			if strings.HasPrefix(a, "-nohupnice") {
-				continue
-			}
-			args = append(args, a)
-		}
-		cmd := exec.Command("nice", args...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-		//cmd.Stdin = nil
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+func Connect(addr, via string, client_type ClientType) Login {
 
-		//fd, _ := os.Open("/dev/null")
-		//cmd.Stdout = fd
-		//cmd.Stderr = fd
-		//stdin, _ := cmd.StdinPipe()
-		//_ = stdin
-		//stdin.Close()
-
-		log.Print("Hupping..")
-		err := cmd.Start()
-		if err != nil {
-			panic(err)
-		}
-		return
-	}
-
-	var conn io.ReadWriteCloser
-	var err error
-
-	if *via != "" {
-		conn, err = util.SafeConnect(*via, *broker_addr, "1234")
+	if via != "" {
+		//log.Printf("Connecting to %v via %v", addr, via)
+		panic("Unimplemented")
 	} else {
-		conn, err = net.Dial("tcp", *broker_addr+":1234")
+		//log.Printf("Connecting to %v", addr)
 	}
+
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		log.Fatal("dialing:", err)
-	}
-	defer func() {
-		conn.Close()
-	}()
-
-	send, recv := util.Gobber(conn)
-
-	if *start_worker {
-		// Workaround: open a tty which can become the ctty if we don't have one.
-		// Slightly annoying to waste one, but it's the simplest workaround
-		pty.Open()
-
-		err := worker.Worker(send, recv)
-		if err != nil {
-			panic(err)
-		}
-		return
+		log.Fatalf("dial(%q): %s", addr, err)
 	}
 
-	err = client.NewJob(send, recv)
-	if err == io.EOF {
-		log.Print("Server disconnected")
-	} else if err != nil {
-		panic(err)
+	xport := fatchan.New(conn, nil)
+	login := make(chan Login)
+	xport.FromChan(login)
+	defer close(login)
+
+	me := Login{
+		Type: client_type,
+		Send: make(chan Message),
+		Recv: make(chan Message),
 	}
+	login <- me
+	return me
 }
