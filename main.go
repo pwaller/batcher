@@ -85,8 +85,8 @@ func main() {
 		}
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-		// TODO: Communicate to the child via a pipe and determine if the
-		// connection was successful before hanging up
+		// TODO(pwaller): Communicate to the child via a pipe and determine if
+		// the connection was successful before daemonizing
 
 		// cmd.ExtraFiles
 		cmd.Stdin = nil
@@ -96,7 +96,7 @@ func main() {
 		log.Print("Starting as daemon")
 		err := cmd.Start()
 		if err != nil {
-			panic(err)
+			log.Fatalf("Daemonize failed: %q", err)
 		}
 		return
 	}

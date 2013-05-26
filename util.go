@@ -41,7 +41,7 @@ func (r *Receiver) Read(readbuf []byte) (n int, err error) {
 	}
 	n, err = r.b.Write(data)
 	if err != nil || n < len(data) {
-		panic(err)
+		return
 	}
 	return r.b.Read(readbuf)
 }

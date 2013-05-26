@@ -12,14 +12,14 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
+	// "syscall"
 
 	"github.com/kylelemons/fatchan"
 )
 
 // Return true if the other end of `addr` belongs to the same user as the server
-// Inspects the contents of /proc/net/tcp
-func CheckUser(addr *net.TCPAddr) bool {
+// by inspecting the contents of /proc/net/tcp
+func CheckUser(addr *net.TCPAddr) (ok bool, err error) {
 	a := []byte(addr.IP)
 	// reverse it
 	for i, j := 0, len(a)-1; i < j; i, j = i+1, j-1 {
@@ -27,16 +27,15 @@ func CheckUser(addr *net.TCPAddr) bool {
 	}
 	ADDR := strings.ToUpper(hex.EncodeToString(a))
 	the_address := ADDR + ":" + fmt.Sprintf("%04X", addr.Port)
-	//log.Print("User IP: ", the_address)
 
 	f, err := os.Open("/proc/net/tcp")
 	if err != nil {
-		panic(err)
+		return
 	}
 	defer f.Close()
 	data, err := ioutil.ReadAll(f)
 	if err != nil {
-		panic(err)
+		return
 	}
 	lines := strings.Split(string(data), "\n")
 	for _, l := range lines {
@@ -47,14 +46,16 @@ func CheckUser(addr *net.TCPAddr) bool {
 		}
 		remote := fields[1]
 
+		// This line represents this connection, check which user it belongs to
 		if remote == the_address {
 			user := fields[7]
 			u, _ := strconv.Atoi(user)
-			return u == os.Geteuid()
+			ok = u == os.Geteuid()
+			return
 		}
 	}
 
-	return false
+	return
 }
 
 type SSHCloser struct {
@@ -62,25 +63,23 @@ type SSHCloser struct {
 }
 
 func (c *SSHCloser) Close() (err error) {
-	log.Println("Closing ssh..")
-	// Let SSH know we're done with him..
-	//c.proc.Signal(syscall.SIGHUP)
-	c.stdin.Close()
-	c.stdout.Close()
+	_ = c.stdin.Close()
+	_ = c.stdout.Close()
 	return
 }
 
-func SafeConnect(via, addr string) (result io.ReadWriteCloser, err error) {
+// Connect to `addr` by sshing through `via`. Assumes that batcher is in $PATH
+// on the other end.
+func SafeDial(via, addr string) (result io.ReadWriteCloser, err error) {
+	// TODO(pwaller): Could implement this using go crypto
+	// https://code.google.com/p/go/source/browse?repo=crypto#hg%2Fssh
 	netcat := fmt.Sprintf("batcher -forward %v", addr)
-	//log.Printf("netcat = %v", netcat)
-	// TODO: This process is not getting correctly reaped!
 	cmd := exec.Command("ssh", via, netcat)
 
 	// Run in its own process group so that we don't get "Killed by signal" messages
 	// (NOTE: This is commented out because if we die, the SSH process does not
 	//        - a bad idea, lest we risk spamming everywhere with ssh processes)
 	// cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	_ = syscall.SIGABRT
 
 	cmd.Stderr = os.Stderr
 
@@ -108,13 +107,12 @@ func SafeConnect(via, addr string) (result io.ReadWriteCloser, err error) {
 	}
 
 	go func() {
-		//err := cmd.Wait()
 		// Note: can't use cmd.Wait here due to data races on the file
-		//       descriptors
+		//       descriptors being closed. Use cmd.Process.Wait() instead.
+		// err := cmd.Wait()
 		_, err := cmd.Process.Wait()
 		if err != nil {
 			// Crap, ssh bailed on us?
-			//panic(err)
 			log.Printf("ssh exited: %v", err)
 		}
 	}()
@@ -137,11 +135,12 @@ func Forward(addr string) {
 	fmt.Println("CONN")
 
 	stdin, stdout := make(chan bool), make(chan bool)
+	cerr := make(chan error)
 
 	go func() {
 		_, err := io.Copy(conn, os.Stdin)
 		if err != nil {
-			panic(err)
+			cerr <- err
 		}
 		log.Printf("Finished copy (stdout -> conn)")
 		close(stdin)
@@ -149,7 +148,7 @@ func Forward(addr string) {
 	go func() {
 		_, err := io.Copy(os.Stdout, conn)
 		if err != nil {
-			panic(err)
+			cerr <- err
 		}
 		log.Printf("Finished copy (conn -> stdout)")
 		close(stdout)
@@ -159,6 +158,8 @@ func Forward(addr string) {
 	select {
 	case <-stdin:
 	case <-stdout:
+	case err := <-cerr:
+		log.Fatalf("Forward(%q) errored: %q", addr, err)
 	}
 }
 
@@ -170,19 +171,20 @@ func Connect(addr, via string, client_type ClientType) (io.ReadWriteCloser, Logi
 	var err error
 
 	if via != "" {
-		//log.Printf("Connecting to %v via %v", addr, via)
-		conn, err = SafeConnect(via, addr)
+		conn, err = SafeDial(via, addr)
 	} else {
-		//log.Printf("Connecting to %v", addr)
 		conn, err = net.Dial("tcp", addr)
 	}
 	if err != nil {
-		log.Fatalf("dial(%q): %s", addr, err)
+		log.Fatalf("Connect(%q, %q): %s", addr, via, err)
 	}
 
 	xport := fatchan.New(conn, nil)
 	login := make(chan Login)
-	xport.FromChan(login)
+	_, err = xport.FromChan(login)
+	if err != nil {
+		log.Fatalf("Connect(%q, %q): %s", addr, via, err)
+	}
 	defer close(login)
 
 	me := Login{

@@ -71,7 +71,11 @@ func (me *Worker) Start() {
 					return
 				}
 				log.Printf("Running job: %v", j.Args)
-				me.RunJob(j)
+				err := me.RunJob(j)
+				if err != nil {
+					// TODO(pwaller): Pass error conditions on to client
+					log.Printf("Starting job failed: %q", err)
+				}
 				// Notify all listeners on j.Done that j is finished
 				close(j.Done)
 				log.Printf(" .. finished")
@@ -80,7 +84,7 @@ func (me *Worker) Start() {
 	}()
 }
 
-func (w *Worker) RunJob(job NewJob) {
+func (w *Worker) RunJob(job NewJob) (err error) {
 
 	defer func() {
 		if err := recover(); err != nil {
@@ -91,26 +95,30 @@ func (w *Worker) RunJob(job NewJob) {
 	args := append([]string{fmt.Sprintf("--adjustment=%v", *nice)}, job.Args...)
 	cmd := exec.Command("nice", args...)
 
-	// TODO: determine what type of pipe we're connected to.
-	stdin, err := cmd.StdinPipe()
+	var stdin io.WriteCloser
+	var stdout, stderr io.ReadCloser
+
+	// TODO(pwaller): determine what type of pipe we're connected to, and
+	// replicate that here (e.g, allocate a pty, direct both stdout/stderror there)
+	stdin, err = cmd.StdinPipe()
 	if err != nil {
-		panic(err)
+		return
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, err = cmd.StdoutPipe()
 	if err != nil {
-		panic(err)
+		return
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err = cmd.StderrPipe()
 	if err != nil {
-		panic(err)
+		return
 	}
 
 	// Descriptors are closed by these goroutines
 
 	job.Accepted <- true
-	e := cmd.Start()
-	if e != nil {
-		panic(e)
+	err = cmd.Start()
+	if err != nil {
+		return
 	}
 
 	var StdinDone sync.WaitGroup
@@ -121,9 +129,10 @@ func (w *Worker) RunJob(job NewJob) {
 
 	state, err := cmd.Process.Wait()
 	if err != nil {
-		panic(err)
+		return
 	}
 	_ = state
-	// TODO: something with state..
+	// TODO(pwaller): something with state..
 	// For example, we should notify the client of the exit code, cpu usage.
+	return
 }

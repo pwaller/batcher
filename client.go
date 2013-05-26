@@ -36,7 +36,10 @@ func (me *Client) Connect(addr, via string, args []string) {
 
 	job := NewJob{
 		args,
-		make(chan []byte), // nil, TODO
+		// nil, TODO(pwaller): I have tested that nil chans are represented as
+		// nil chans on the other end of the connection, so we can use this to
+		// represent reading/writing from/to /dev/null
+		make(chan []byte),
 		make(chan []byte),
 		make(chan []byte),
 		make(chan bool),
@@ -52,8 +55,8 @@ func (me *Client) Connect(addr, via string, args []string) {
 	// Wait for the job to be accepted before we start reading in stdin
 	<-job.Accepted
 
-	// TODO: Figure out where os.Std* are pointing, and if they're all pointing
-	//       at the same terminal.
+	// TODO(pwaller): Figure out where os.Std* are pointing, and if they're all
+	//                pointing at the same terminal.
 
 	go SendForReader(job.Stdin, os.Stdin)
 
@@ -68,7 +71,7 @@ func (me *Client) Connect(addr, via string, args []string) {
 	go func() {
 		for msg := range me.Recv {
 			log.Printf("Server sent me a message! %v", msg)
-			panic("Wasn't expecting a message..")
+			panic("This shouldn't happen.")
 		}
 		connection_finished <- true
 	}()

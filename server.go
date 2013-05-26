@@ -12,6 +12,12 @@ import (
 )
 
 type Server struct {
+	// TODO(pwaller): Currently workers read from this (treating it as a queue)
+	// However, instead we should have something central read from it and then
+	// choose a worker based on its load.
+	//
+	// Current behaviour is a round-robin across connected workers in the order
+	// in which they connect.
 	RequestSlot chan chan NewJob
 }
 
@@ -39,13 +45,16 @@ func (s *Server) ListenAndServe(addr string) {
 			address := conn.RemoteAddr().(*net.TCPAddr)
 			if !address.IP.IsLoopback() {
 				log.Printf("Rejecting non-loopback connection!")
-				conn.Close()
+				_ = conn.Close()
 				continue
 			}
 
-			if !CheckUser(address) {
+			if ok, err := CheckUser(address); !ok || err != nil {
+				if err != nil {
+					log.Printf("Error determining user from connection: %q", err)
+				}
 				log.Printf("Rejecting connection from different user! %v", address)
-				conn.Close()
+				_ = conn.Close()
 				continue
 			}
 
@@ -58,6 +67,7 @@ func (s *Server) ListenAndServe(addr string) {
 	switch <-c {
 	case syscall.SIGUSR1:
 		log.Printf("Unimplemented: safe restart")
+
 	default:
 	}
 }
@@ -68,10 +78,17 @@ func (s *Server) ServeOne(id string, conn io.ReadWriteCloser) {
 
 	xport := fatchan.New(conn, nil)
 	login := make(chan Login)
-	xport.ToChan(login)
+	_, err := xport.ToChan(login)
+	if err != nil {
+		return
+	}
 
 	client := <-login
 	defer close(client.Recv)
+
+	// See https://github.com/kylelemons/fatchan/issues/3
+	// This is a workaround, the server sends something first.
+	client.Recv <- Message{Type: MESSAGE_TYPE_ACKNOWLEDGE}
 
 	switch client.Type {
 	case CLIENT_TYPE_BROADCAST:
@@ -92,13 +109,11 @@ func (s *Server) ServeWorker(client Login) {
 	log.Printf("Serving worker")
 	defer log.Printf("Client disconnected")
 
-	// See https://github.com/kylelemons/fatchan/issues/3
-	// This is a workaround, the server sends something first.
-	client.Recv <- Message{Type: MESSAGE_TYPE_ACKNOWLEDGE}
-
 	worker_closed := make(chan bool)
 
 	for m := range client.Send {
+		// Messages the worker is allowed to send to us
+		// TODO(pwaller): Maybe extend this with worker heartbeat/load?
 		switch m.Type {
 		case MESSAGE_TYPE_NEW_WORKER:
 			go s.FeedWorker(m.Worker, worker_closed)
@@ -137,8 +152,6 @@ func (s *Server) FeedWorker(worker NewWorker, worker_closed <-chan bool) {
 func (s *Server) ServeJobRequest(client Login) {
 	log.Printf("Serving job request")
 	defer log.Printf("Client disconnected")
-
-	client.Recv <- Message{Type: MESSAGE_TYPE_ACKNOWLEDGE}
 
 	for m := range client.Send {
 		switch m.Type {
