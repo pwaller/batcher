@@ -2,9 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
+	"syscall"
 )
 
 type Worker struct {
@@ -12,8 +16,10 @@ type Worker struct {
 }
 
 func (me *Worker) Connect(addr, via string) {
-
-	me.Login = Connect(addr, via, CLIENT_TYPE_WORKER)
+	var conn io.ReadWriteCloser
+	conn, me.Login = Connect(addr, via, CLIENT_TYPE_WORKER)
+	defer conn.Close()
+	defer close(me.Send)
 
 	log.Printf("Connected to server")
 	defer log.Printf("Disconnected from server")
@@ -26,13 +32,25 @@ func (me *Worker) Connect(addr, via string) {
 		me.Start()
 	}
 
-	for msg := range me.Recv {
-		switch msg.Type {
-		default:
-			log.Panicf("Unexpected message type! %v", msg)
+	signalled := make(chan os.Signal)
+	signal.Notify(signalled, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGUSR1)
+
+	for {
+		select {
+		case msg, ok := <-me.Recv:
+			if !ok {
+				// Connection closed
+				return
+			}
+
+			log.Panicf("Unexpected message from server: %#+v", msg)
+			return
+
+		case s := <-signalled:
+			log.Printf("Exiting due to %v", s)
+			return
 		}
 	}
-
 }
 
 func (me *Worker) Start() {
@@ -107,4 +125,5 @@ func (w *Worker) RunJob(job NewJob) {
 	}
 	_ = state
 	// TODO: something with state..
+	// For example, we should notify the client of the exit code, cpu usage.
 }

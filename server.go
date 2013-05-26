@@ -23,7 +23,7 @@ func (s *Server) ListenAndServe(addr string) {
 	log.Printf("Serving..")
 	defer log.Printf("Server ceasing..")
 
-	listener, err := net.Listen("tcp", addr)
+	listener, err := net.Listen("tcp4", addr)
 	if err != nil {
 		log.Fatalf("listen(%q): %s", addr, err)
 	}
@@ -34,6 +34,19 @@ func (s *Server) ListenAndServe(addr string) {
 			conn, err := listener.Accept()
 			if err != nil {
 				log.Fatalf("accept(): %s", err)
+			}
+
+			address := conn.RemoteAddr().(*net.TCPAddr)
+			if !address.IP.IsLoopback() {
+				log.Printf("Rejecting non-loopback connection!")
+				conn.Close()
+				continue
+			}
+
+			if !CheckUser(address) {
+				log.Printf("Rejecting connection from different user! %v", address)
+				conn.Close()
+				continue
 			}
 
 			go s.ServeOne(conn.RemoteAddr().String(), conn)

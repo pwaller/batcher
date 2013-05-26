@@ -3,10 +3,10 @@ package main
 import (
 	"flag"
 	"log"
-	"net"
 	"os"
-
-	"github.com/kylelemons/fatchan"
+	"os/exec"
+	"strings"
+	"syscall"
 )
 
 // Flags
@@ -15,6 +15,10 @@ var (
 	worker   = flag.Bool("worker", false, "Run as worker")
 	n_worker = flag.Int("N", 1, "Number of workers to start")
 	nice     = flag.Int("nice", 15, "Niceness of workers")
+
+	forward = flag.Bool("forward", false, "[internal]")
+
+	daemon = flag.Bool("daemon", false, "Run as daemon")
 
 	broadcast         = flag.Bool("broadcast", false, "Run on all workers")
 	broadcast_machine = flag.Bool("broadcast-machine", false, "Run on all machines")
@@ -71,40 +75,43 @@ type NewWorker struct {
 func main() {
 	flag.Parse()
 
+	if *daemon {
+		var args []string
+		for _, a := range os.Args {
+			if strings.HasPrefix(a, "-daemon") {
+				continue
+			}
+			args = append(args, a)
+		}
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		// TODO: Communicate to the child via a pipe and determine if the
+		// connection was successful before hanging up
+
+		// cmd.ExtraFiles
+		cmd.Stdin = nil
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+
+		log.Print("Starting as daemon")
+		err := cmd.Start()
+		if err != nil {
+			panic(err)
+		}
+		return
+	}
+
 	switch {
+	case *forward:
+		Forward(flag.Args()[0])
+
 	case *broker:
 		NewServer().ListenAndServe(*addr)
+
 	case *worker:
 		(&Worker{}).Connect(*addr, *via)
+
 	default:
-		(&Client{}).Connect(*addr, *via, os.Args[1:])
+		(&Client{}).Connect(*addr, *via, flag.Args())
 	}
-}
-
-func Connect(addr, via string, client_type ClientType) Login {
-
-	if via != "" {
-		//log.Printf("Connecting to %v via %v", addr, via)
-		panic("Unimplemented")
-	} else {
-		//log.Printf("Connecting to %v", addr)
-	}
-
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		log.Fatalf("dial(%q): %s", addr, err)
-	}
-
-	xport := fatchan.New(conn, nil)
-	login := make(chan Login)
-	xport.FromChan(login)
-	defer close(login)
-
-	me := Login{
-		Type: client_type,
-		Send: make(chan Message),
-		Recv: make(chan Message),
-	}
-	login <- me
-	return me
 }

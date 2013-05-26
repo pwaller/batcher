@@ -22,7 +22,9 @@ func (w *WriterNopCloser) Close() error { return nil }
 
 func (me *Client) Connect(addr, via string, args []string) {
 
-	me.Login = Connect(addr, via, CLIENT_TYPE_JOB)
+	var conn io.ReadWriteCloser
+	conn, me.Login = Connect(addr, via, CLIENT_TYPE_JOB)
+	defer conn.Close()
 	defer close(me.Send)
 
 	// log.Printf("Connected to server")
