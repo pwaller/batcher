@@ -43,8 +43,24 @@ func (me *Worker) Connect(addr, via string) {
 				return
 			}
 
-			log.Panicf("Unexpected message from server: %#+v", msg)
-			return
+			switch msg.Type {
+			case MESSAGE_TYPE_BROADCAST:
+				// Broadcasts get run right now, with no queuing
+				go func() {
+					// log.Print("Processing broadcast")
+					// defer log.Print(".. done")
+
+					j := msg.Job
+					err := me.RunJob(j)
+					if err != nil {
+						log.Printf("Broadcast job failed: %#+v", j)
+					}
+					close(j.Accepted)
+					close(j.Done)
+				}()
+			default:
+				log.Panicf("Unexpected message from server: %#+v", msg)
+			}
 
 		case s := <-signalled:
 			log.Printf("Exiting due to %v", s)
@@ -77,6 +93,7 @@ func (me *Worker) Start() {
 					log.Printf("Starting job failed: %q", err)
 				}
 				// Notify all listeners on j.Done that j is finished
+				close(j.Accepted)
 				close(j.Done)
 				log.Printf(" .. finished")
 			}
@@ -100,33 +117,50 @@ func (w *Worker) RunJob(job NewJob) (err error) {
 
 	// TODO(pwaller): determine what type of pipe we're connected to, and
 	// replicate that here (e.g, allocate a pty, direct both stdout/stderror there)
-	stdin, err = cmd.StdinPipe()
-	if err != nil {
-		return
+	if job.Stdin != nil {
+		stdin, err = cmd.StdinPipe()
+		if err != nil {
+			return
+		}
 	}
-	stdout, err = cmd.StdoutPipe()
-	if err != nil {
-		return
+	if job.Stdout != nil {
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			return
+		}
 	}
-	stderr, err = cmd.StderrPipe()
-	if err != nil {
-		return
+	if job.Stderr != nil {
+		stderr, err = cmd.StderrPipe()
+		if err != nil {
+			return
+		}
 	}
 
-	// Descriptors are closed by these goroutines
-
+	// Let the client know we've accepted the job and we're about to start
+	// forwarding stdin/stdout
 	job.Accepted <- true
 	err = cmd.Start()
 	if err != nil {
 		return
 	}
 
-	var StdinDone sync.WaitGroup
-	StdinDone.Add(1)
-	go RecieveForWriter(&StdinDone, job.Stdin, stdin)
-	go SendForReader(job.Stdout, stdout)
-	go SendForReader(job.Stderr, stderr)
+	// Start a goroutine to handle each pipe, where needed
+	// Pipes are are closed by RecieveForWriter/SendForReader
 
+	// TODO(pwaller): Figure out how to use or eliminate StdinDone
+	var StdinDone sync.WaitGroup
+	if stdin != nil {
+		StdinDone.Add(1)
+		go RecieveForWriter(&StdinDone, job.Stdin, stdin)
+	}
+	if stdout != nil {
+		go SendForReader(job.Stdout, stdout)
+	}
+	if stderr != nil {
+		go SendForReader(job.Stderr, stderr)
+	}
+
+	// Don't use cmd.Wait() because they close the pipes, which we don't want.
 	state, err := cmd.Process.Wait()
 	if err != nil {
 		return

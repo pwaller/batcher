@@ -10,6 +10,7 @@ import (
 )
 
 type Client struct {
+	broadcast_machine bool
 	Login
 }
 
@@ -39,6 +40,7 @@ func (me *Client) Connect(addr, via string, args []string) {
 		// nil, TODO(pwaller): I have tested that nil chans are represented as
 		// nil chans on the other end of the connection, so we can use this to
 		// represent reading/writing from/to /dev/null
+		make(chan int),
 		make(chan []byte),
 		make(chan []byte),
 		make(chan []byte),
@@ -46,11 +48,13 @@ func (me *Client) Connect(addr, via string, args []string) {
 		make(chan bool),
 	}
 
-	log.Printf("Requesting new job: %v", args)
-	me.Send <- Message{
-		Type: MESSAGE_TYPE_NEW_JOB,
-		Job:  job,
+	mtype := MESSAGE_TYPE_NEW_JOB
+	if me.broadcast_machine {
+		mtype = MESSAGE_TYPE_BROADCAST
 	}
+
+	// log.Printf("Requesting new job: %v", args)
+	me.Send <- Message{Type: mtype, Job: job}
 
 	// Wait for the job to be accepted before we start reading in stdin
 	<-job.Accepted
@@ -62,6 +66,8 @@ func (me *Client) Connect(addr, via string, args []string) {
 
 	var Receivers sync.WaitGroup
 	Receivers.Add(2)
+	defer Receivers.Wait()
+
 	go RecieveForWriter(&Receivers, job.Stdout, os.Stdout)
 	// Don't allow remote to close stderr since that's where we're reporting
 	// information to.
@@ -80,10 +86,9 @@ func (me *Client) Connect(addr, via string, args []string) {
 	signal.Notify(signalled, os.Interrupt, os.Kill, syscall.SIGHUP, syscall.SIGUSR1)
 
 	for {
-		//log.Println("Awaiting signal")
+		// log.Println("Awaiting signal")
 		select {
 		case <-job.Done:
-			Receivers.Wait()
 			return
 
 		case <-signalled:

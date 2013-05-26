@@ -126,7 +126,8 @@ func SafeDial(via, addr string) (result io.ReadWriteCloser, err error) {
 // Primitive "nc" lookalike which emits "CONN" when there is a successful
 // connection
 func Forward(addr string) {
-	log.Printf("Connecting to %v", addr)
+	// log.Printf("Connecting to %v", addr)
+
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		log.Printf("batcher -forward: %q", err)
@@ -142,7 +143,7 @@ func Forward(addr string) {
 		if err != nil {
 			cerr <- err
 		}
-		log.Printf("Finished copy (stdout -> conn)")
+		// log.Printf("Finished copy (stdin -> conn)")
 		close(stdin)
 	}()
 	go func() {
@@ -150,7 +151,7 @@ func Forward(addr string) {
 		if err != nil {
 			cerr <- err
 		}
-		log.Printf("Finished copy (conn -> stdout)")
+		// log.Printf("Finished copy (conn -> stdout)")
 		close(stdout)
 	}()
 

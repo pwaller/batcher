@@ -1,5 +1,14 @@
 package main
 
+// TODO(pwaller):
+//
+// Bugs:
+//
+//   b bash -c "cat ~/random_data | tee /dev/stderr | md5sum 2>&1" 3>&1 1>&2 2>&3 | md5sum
+//   (md5 sums don't match, data is getting scrambled)
+//
+//
+
 import (
 	"flag"
 	"log"
@@ -7,6 +16,9 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 // Flags
@@ -24,6 +36,8 @@ var (
 	broadcast_machine = flag.Bool("broadcast-machine", false, "Run on all machines")
 	addr              = flag.String("addr", ":1234", "Address on which to listen or connect")
 	via               = flag.String("via", os.Getenv("BATCHER_VIA"), "Host to ssh via")
+
+	pprof = flag.Bool("pprof", false, "Run profiler on port 6060")
 )
 
 type ClientType int
@@ -32,7 +46,6 @@ const (
 	CLIENT_TYPE_UNKNOWN ClientType = iota
 	CLIENT_TYPE_WORKER
 	CLIENT_TYPE_JOB
-	CLIENT_TYPE_BROADCAST
 )
 
 type Login struct {
@@ -60,12 +73,18 @@ type Message struct {
 type NewJob struct {
 	Args []string
 
+	// Used to signal remote process, e.g, interrupt.
+	// If closed, the running job (if any) is killed.
+	Signal chan int `fatchan:"request"`
+
 	Stdin  chan []byte `fatchan:"request"`
 	Stdout chan []byte `fatchan:"reply"`
 	Stderr chan []byte `fatchan:"reply"`
 
 	Accepted chan bool `fatchan:"reply"`
 	Done     chan bool `fatchan:"reply"`
+	// Done is a channel which is closed when the job is finished through any
+	// means.
 }
 
 type NewWorker struct {
@@ -74,6 +93,13 @@ type NewWorker struct {
 
 func main() {
 	flag.Parse()
+
+	if *pprof {
+		go func() {
+			log.Println("Serving pprof on 6060..")
+			log.Println(http.ListenAndServe("localhost:6060", nil))
+		}()
+	}
 
 	if *daemon {
 		var args []string
@@ -112,6 +138,7 @@ func main() {
 		(&Worker{}).Connect(*addr, *via)
 
 	default:
-		(&Client{}).Connect(*addr, *via, flag.Args())
+		c := Client{broadcast_machine: *broadcast_machine}
+		c.Connect(*addr, *via, flag.Args())
 	}
 }
