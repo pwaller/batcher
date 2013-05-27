@@ -168,6 +168,10 @@ func main() {
 
 	default:
 		c := Client{broadcast_machine: *broadcast_machine}
+		if len(flag.Args()) == 0 {
+			flag.Usage()
+			return
+		}
 		c.Connect(*addr, *via, flag.Args())
 	}
 }
