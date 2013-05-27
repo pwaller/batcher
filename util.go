@@ -13,7 +13,9 @@ type Sender chan<- []byte
 var _ io.WriteCloser = (*Sender)(nil)
 
 func (s *Sender) Write(data []byte) (n int, err error) {
-	*s <- data
+	// Must send a copy of the data, otherwise `data` might be overwritten
+	// before it is used downstream
+	*s <- append([]byte{}, data...)
 	return len(data), nil
 }
 
@@ -35,6 +37,7 @@ func NewReceiver(c <-chan []byte) *Receiver {
 }
 
 func (r *Receiver) Read(readbuf []byte) (n int, err error) {
+	// TODO(pwaller): Do we first need to empty the buffer?
 	data, ok := <-r.c
 	if !ok {
 		return 0, io.EOF
