@@ -71,7 +71,7 @@ func (me *Worker) Connect(addr, via string) {
 
 func (me *Worker) Start() {
 	// Let the Broker know that there is a new place it can send jobs to
-	worker := NewWorker{make(chan NewJob)}
+	worker := NewWorker{make(chan NewJob), make(chan NewJob)}
 
 	me.Send <- Message{
 		Type:   MESSAGE_TYPE_NEW_WORKER,
@@ -82,6 +82,22 @@ func (me *Worker) Start() {
 		for {
 			select {
 			case j, ok := <-worker.NewJob:
+				if !ok {
+					log.Printf("Worker finished.")
+					return
+				}
+				log.Printf("Running job: %v", j.Args)
+				err := me.RunJob(j)
+				if err != nil {
+					// TODO(pwaller): Pass error conditions on to client
+					log.Printf("Starting job failed: %q", err)
+				}
+				// Notify all listeners on j.Done that j is finished
+				close(j.Accepted)
+				close(j.Done)
+				log.Printf(" .. finished")
+
+			case j, ok := <-worker.NewJobBroadcast:
 				if !ok {
 					log.Printf("Worker finished.")
 					return

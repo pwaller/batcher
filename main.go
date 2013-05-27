@@ -2,12 +2,33 @@ package main
 
 // TODO(pwaller):
 //
+// * Pipes on terminals or disconnected pipes
+// * Exit codes / signals
+// * Transmit CWD
+// * Transmit environment, perhaps?
+// * Arguments separated by -- are separate jobs
+// * Worker broadcast (as opposed to machine broadcast)
+//
 // Bugs:
 //
 //   b bash -c "cat ~/random_data | tee /dev/stderr | md5sum 2>&1" 3>&1 1>&2 2>&3 | md5sum
 //   (md5 sums don't match, data is getting scrambled)
 //
 //
+// Ideas:
+//
+//   Optionally prepend hostname to each line written
+//
+//   Named queues (a worker belongs to a particular name)
+//
+//   Could use a named worker queue as a way of negotiating access to a
+//     resource, e.g, disk. For example, if you only want N workers to hit a
+//     resource (disk?) simultaneously, each worker runs:
+//       'batcher bash -c 'echo OK && kill -STOP "$$"'
+//     continues when it sees "OK" and kills the batcher process when it's done.
+//     .. OTOH, maybe NFS et al can already handle this?
+//     .. batcher could also have a mode where it blocks until the job is
+//	 	  accepted and then quits.
 
 import (
 	"flag"
@@ -88,7 +109,8 @@ type NewJob struct {
 }
 
 type NewWorker struct {
-	NewJob chan NewJob `fatchan:"reply"`
+	NewJob          chan NewJob `fatchan:"reply"`
+	NewJobBroadcast chan NewJob `fatchan:"reply"`
 }
 
 func main() {

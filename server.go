@@ -193,6 +193,7 @@ func (s *Server) ServeWorker(client Login) {
 // Obtain jobs from the job queue
 func (s *Server) FeedWorker(worker NewWorker, worker_closed <-chan bool) {
 	defer close(worker.NewJob)
+	defer close(worker.NewJobBroadcast)
 
 	for {
 		// Read from the broker request queue, fetch the job and give it to the

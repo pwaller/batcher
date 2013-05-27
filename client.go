@@ -69,8 +69,9 @@ func (me *Client) Connect(addr, via string, args []string) {
 	defer Receivers.Wait()
 
 	go RecieveForWriter(&Receivers, job.Stdout, os.Stdout)
+
 	// Don't allow remote to close stderr since that's where we're reporting
-	// information to.
+	// information to with log.*
 	go RecieveForWriter(&Receivers, job.Stderr, &WriterNopCloser{os.Stderr})
 
 	connection_finished := make(chan bool)
