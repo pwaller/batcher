@@ -35,6 +35,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -42,11 +43,13 @@ import (
 	_ "net/http/pprof"
 )
 
+var ncpu = runtime.NumCPU() / 2 // assume hyperthreading
+
 // Flags
 var (
 	broker   = flag.Bool("broker", false, "Run as broker")
 	worker   = flag.Bool("worker", false, "Run as worker")
-	n_worker = flag.Int("N", 1, "Number of workers to start")
+	n_worker = flag.Int("N", ncpu, "Number of workers to start")
 	nice     = flag.Int("nice", 15, "Niceness of workers")
 
 	forward = flag.Bool("forward", false, "[internal]")
