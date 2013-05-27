@@ -154,7 +154,14 @@ func main() {
 		Forward(flag.Args()[0])
 
 	case *broker:
-		NewServer().ListenAndServe(*addr)
+		started := make(chan bool)
+		if *worker {
+			go func() {
+				<-started
+				go (&Worker{}).Connect(*addr, *via)
+			}()
+		}
+		NewServer().ListenAndServe(*addr, started)
 
 	case *worker:
 		(&Worker{}).Connect(*addr, *via)

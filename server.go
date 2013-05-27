@@ -93,7 +93,7 @@ func NewServer() *Server {
 	return &Server{make(chan chan NewJob), Workers{m: map[*chan Message]bool{}}}
 }
 
-func (s *Server) ListenAndServe(addr string) {
+func (s *Server) ListenAndServe(addr string, ready chan bool) {
 	log.Printf("Serving..")
 	defer log.Printf("Server ceasing..")
 
@@ -102,6 +102,8 @@ func (s *Server) ListenAndServe(addr string) {
 		log.Fatalf("listen(%q): %s", addr, err)
 	}
 	defer listener.Close()
+
+	close(ready) // Signal to anyone that cares that the server is up
 
 	go func() {
 		for {
