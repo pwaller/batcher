@@ -56,6 +56,7 @@ var (
 
 	daemon = flag.Bool("daemon", false, "Run as daemon")
 
+	async             = flag.Bool("async", false, "Don't wait for job")
 	broadcast         = flag.Bool("broadcast", false, "Run on all workers")
 	broadcast_machine = flag.Bool("broadcast-machine", false, "Run on all machines")
 	addr              = flag.String("addr", ":1234", "Address on which to listen or connect")
@@ -95,7 +96,8 @@ type Message struct {
 }
 
 type NewJob struct {
-	Args []string
+	Args  []string
+	Async bool
 
 	// Used to signal remote process, e.g, interrupt.
 	// If closed, the running job (if any) is killed.
@@ -170,7 +172,10 @@ func main() {
 		(&Worker{}).Connect(*addr, *via)
 
 	default:
-		c := Client{broadcast_machine: *broadcast_machine}
+		c := Client{
+			broadcast_machine: *broadcast_machine,
+			async:             *async,
+		}
 		if len(flag.Args()) == 0 {
 			flag.Usage()
 			return

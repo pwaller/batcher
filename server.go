@@ -231,6 +231,27 @@ func (s *Server) ServeJobRequest(client Login) {
 			// Someone has to accept our slot before we can put a job onto it
 			slot := make(chan NewJob)
 
+			if m.Job.Async {
+				// Client can't communicate with us
+				m.Job.Stdin = nil
+				m.Job.Signal = nil
+
+				// Let the client know we've accepted the job.
+				close(m.Job.Done)
+				close(m.Job.Accepted)
+				
+				m.Job.Done = make(chan bool)
+				m.Job.Accepted = make(chan bool)
+
+				// Server doesn't want to wait for the job to be accepted.
+				go func() {
+					s.RequestSlot <- slot
+					slot <- m.Job
+				}()
+
+				return
+			}
+
 			select {
 			case s.RequestSlot <- slot:
 				slot <- m.Job

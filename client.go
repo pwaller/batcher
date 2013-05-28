@@ -10,7 +10,7 @@ import (
 )
 
 type Client struct {
-	broadcast_machine bool
+	broadcast_machine, async bool
 	Login
 }
 
@@ -35,19 +35,28 @@ func (me *Client) Connect(addr, via string, args []string) {
 		log.Panicf("First message from server was not an acknowledgement!")
 	}
 
+	// nil chans represent /dev/null
+	var stdin, stdout, stderr chan []byte
+
+	// TODO(pwaller): Figure out where os.Std* are pointing, and if they're all
+	//                pointing at the same terminal.
+	if !me.async {
+		stdin = make(chan []byte)
+		stdout = make(chan []byte)
+		stderr = make(chan []byte)
+	}
+
 	job := NewJob{
 		args,
-		// nil, TODO(pwaller): I have tested that nil chans are represented as
-		// nil chans on the other end of the connection, so we can use this to
-		// represent reading/writing from/to /dev/null
+		me.async,
 		make(chan int),
-		make(chan []byte),
-		make(chan []byte),
-		make(chan []byte),
+		stdin, stdout, stderr,
 		make(chan bool),
 		make(chan bool),
 	}
 
+	// TODO(pwaller): For non-broadcast jobs, split Args on "--" and submit
+	//                one job per set of arguments.
 	mtype := MESSAGE_TYPE_NEW_JOB
 	if me.broadcast_machine {
 		mtype = MESSAGE_TYPE_BROADCAST
@@ -59,20 +68,26 @@ func (me *Client) Connect(addr, via string, args []string) {
 	// Wait for the job to be accepted before we start reading in stdin
 	<-job.Accepted
 
-	// TODO(pwaller): Figure out where os.Std* are pointing, and if they're all
-	//                pointing at the same terminal.
+	if stdin != nil {
+		go SendForReader(stdin, os.Stdin)
+	}
 
-	go SendForReader(job.Stdin, os.Stdin)
-
+	// Receivers need to terminate before main(), otherwise we might close
+	// before we've received everything from the other side.
 	var Receivers sync.WaitGroup
-	Receivers.Add(2)
 	defer Receivers.Wait()
 
-	go RecieveForWriter(&Receivers, job.Stdout, os.Stdout)
+	if stdout != nil {
+		Receivers.Add(1)
+		go RecieveForWriter(&Receivers, stdout, os.Stdout)
+	}
 
-	// Don't allow remote to close stderr since that's where we're reporting
-	// information to with log.*
-	go RecieveForWriter(&Receivers, job.Stderr, &WriterNopCloser{os.Stderr})
+	if stderr != nil {
+		Receivers.Add(1)
+		// Don't allow remote to close stderr since that's where we're reporting
+		// information to with log.*.
+		go RecieveForWriter(&Receivers, stderr, &WriterNopCloser{os.Stderr})
+	}
 
 	connection_finished := make(chan bool)
 	go func() {
@@ -97,6 +112,7 @@ func (me *Client) Connect(addr, via string, args []string) {
 			return
 
 		case <-connection_finished:
+			// TODO(pwaller): This shouldn't be seen during normal operation
 			log.Println("Server dropped..")
 			return
 		}
